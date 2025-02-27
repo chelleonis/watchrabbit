@@ -41,6 +41,8 @@ type FileWatcherConfig struct {
 	PollInterval       int      `envconfig:"POLL_INTERVAL" default:"5"` // in seconds
 }
 
+// BIOMARKER prefix will be applied to all .env variables.
+// e.g. setting RabbitMQ uri: -> BIOMARKER_RABBITMQ_URI
 func Load() (*Config, error) {
 	var cfg Config
 	err := envconfig.Process("BIOMARKER", &cfg)
