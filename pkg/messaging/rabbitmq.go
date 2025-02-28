@@ -1,7 +1,9 @@
+// pkg/messaging/rabbitmq.go
 package messaging
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"time"
 
@@ -168,14 +170,71 @@ func (c *RabbitMQClient) SetupInfrastructure() error {
 
 // publish events to an exchange
 func (c *RabbitMQClient) PublishEvent(ctx context.Context, exchange, routingKey string, event interface{}) error {
-
+	// convert event to JSON
+	body, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	//publishing
+	// exchange name, routing key, mandatory, immediate, Publishing Notes
+	return c.ch.PublishWithContext(ctx,
+		exchange,
+		routingKey,
+		false,
+		false,
+		amqp.Publishing{
+			ContentType: "application/json",
+			DeliveryMode: amqp.Presistent,
+			Body: body,
+			Timestamp: time.Now(),
+		},
+	)
 }
 
 // subscribes to messages from a queue
 func (c *RabbitMQClient) Subscribe(queue string, handler func([]byte) error) error {
+	// start consuming from specified queue
+	// queue name, consumer tag, auto-acknowledge, exclusive, no-local, no-wait, extraArgs
+	msgs, err := c.ch.Consume(
+		queue,
+		"",
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	//spin up goroutine to process method (non-blocking)
+	go func() {
+		for msg := range msgs {
+			err := handler(msg.Body)
+			// if an error occurs, reject the message and requeue it
+			if err != nil {
+				log.Printf("Error handling message: %v", err)
+				// reject multiple? , requeue?
+				msg.Nack(false, true)
+			} else {
+				msg.Ack(false)
+			}
+		}
+	}()
 
+	return nil
 }
 
 func (c *RabbitMQClient) Close() error {
-
+    c.closed = true
+    
+    if c.ch != nil {
+        c.ch.Close()
+    }
+    
+    if c.conn != nil {
+        return c.conn.Close()
+    }
+    
+    return nil
 }
