@@ -11,6 +11,7 @@ type Config struct {
 	S3          S3Config          `envconfig:"S3"`
 	Redis       RedisConfig       `envconfig:"REDIS"`
 	FileWatcher FileWatcherConfig `envconfig:"FILEWATCHER"`
+	Analysis AnalysisConfig `envconfig:"ANALYSIS"`
 }
 
 //TODO: change configs once RabbitMQ is configurated
@@ -39,6 +40,14 @@ type FileWatcherConfig struct {
 	Directories        []string `envconfig:"DIRECTORIES" default:"/tmp/FOLDER-TO-BE-NAMED"`
 	SupportedExtensions []string `envconfig:"SUPPORTED_EXTENSIONS" default:".csv,.sas7bdat"`
 	PollInterval       int      `envconfig:"POLL_INTERVAL" default:"5"` // in seconds
+}
+
+type AnalysisConfig struct {
+	RExecutable  string `envconfig:"R_EXECUTABLE"` // Path to R executable (empty to auto-detect)
+	ScriptsDir   string `envconfig:"SCRIPTS_DIR" default:"./scripts/r"` // Directory containing R scripts
+	Timeout      int    `envconfig:"TIMEOUT" default:"300"` // Timeout in seconds
+	OutputDir    string `envconfig:"OUTPUT_DIR" default:""` // Output directory (empty for system temp)
+	RetainOutput bool   `envconfig:"RETAIN_OUTPUT" default:"true"` // Whether to keep output files after upload
 }
 
 // BIOMARKER prefix will be applied to all .env variables.

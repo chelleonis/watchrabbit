@@ -25,4 +25,6 @@ type AnalysisCompletedEvent struct {
 	AnalysisType   string        `json:"analysisType"`
 	ProcessingTime time.Duration `json:"processingTime"` // How long the analysis took
 	Timestamp      time.Time     `json:"timestamp"`
+	Status         string        `json:"status"`         // "success", "failed", "timeout"
+	ErrorMessage   string        `json:"errorMessage,omitempty"` // Error message if analysis failed
 }
