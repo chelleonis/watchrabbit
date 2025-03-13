@@ -4,11 +4,13 @@ package database
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
@@ -101,7 +103,7 @@ func NewPostgresSerivce(config PostgresConfig) (*PostgresService, error) {
 func (p *PostgresService) Close() error {
 	return p.db.Close()
 }
-
+// File section
 // return the ID of the file record
 func (p *PostgresService) CreateFileRecord(ctx context.Context, filePath string, fileSize int64, metadata map[string]string) (int64, error) {
 	fileName := filepath.Base(filePath)
@@ -127,3 +129,98 @@ func (p *PostgresService) CreateFileRecord(ctx context.Context, filePath string,
 	log.Printf("Created file record with ID: %d", fileID)
 	return fileID, nil
 }
+
+func (p *PostgresService) GetFileRecordByPath(ctx context.Context, filePath string) (*FileRecord, error) {
+	query := `
+	SELECT file_id, file_path, file_name, file_type, file_size
+	created_at, last_modified, checksum, metadata
+	FROM biomarker.files
+	WHERE file_path = $1
+	`
+
+	var file FileRecord 
+	err := p.db.GetContext(ctx, &file, query, filePath) 
+	if err != nil {
+		if errors.Is(err, sqlx.ErrNoRows) {
+			//file not found in db, no results
+			return nil, nil 
+		}
+		return nil, fmt.Errorf("failed to get file: %v", err)
+	}
+
+	if file.Metadata != nil {
+		file.MetadataMap = make(map[string]string)
+		if err := json.Unmarshal(file.Metadata, &file.MetadataMap); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal metadata: %v", err)
+		}
+	}
+
+	return &file, nil
+}
+
+// Analysis Section
+func (p *PostgresService) CreateAnalysisRecord(ctx context.Context, fileID int64, analysisType, status string, metadata map[string]string) (string, error) {
+	analysisUUID := uuid.New().String()
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal metadata: %v", err)
+	}
+
+	query := `
+	INSERT INTO biomarker.analyses
+	(analysis_uuid, file_id, analysis_type, status, metadata)
+	VALUES ($1, $2, $3, $4, $5)
+	`
+
+	_, err = p.db.ExecContext(ctx, query, analysisUUID, fileID, analysisType, status, metadataJSON)
+	if err != nil {
+		return "", fmt.Errorf("failed to create analysis record: %v", err)
+	}
+
+	log.Printf("Created analysis with UUID: %s", analysisUUID)
+	return analysisUUID, nil
+}
+
+func (p *PostgresService) UpdateAnalysisStatus(ctx context.Context, analysisUUID string, status string, error string) error {
+	query := `SELECT biomarker.update_analysis_status($1, $2, $3)`
+	_, err = p.db.ExecContext(ctx, query, analysisUUID, status, errorMessage)
+
+	if err != nil {
+		return fmt.Errorf("failed to update analysis status: %v", err)
+	}
+
+	log.Printf("Updated analysis %s status to: %s", analysisUUID, status)
+	return nil
+}
+
+func (p *PostgresService) GetAnalysisRecordByUUID(ctx context.Context, analysisUUID string) (*AnalysisRecord, error) {
+	query := `
+	SELECT analysis_id, analysis_uuid, file_id, analysis_type, status, started_at, completed_at,
+	duration_ms, error_message, created_by, metadata
+	FROM biomarker.analyses
+	WHERE analysis_uuid = $1
+	`
+	var analysis AnalysisRecord
+	err := p.db.ExecContext(ctx, query, analysisUUID)
+
+	if err != nil {
+		if errors.Is(err, sqlx.ErrNoRows) {
+			// no analysis found with UUID in db
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to retrieve analysis record: %v", err)
+	}
+
+	if analysis.Metadata != nil {
+		analysis.MetadataMap = make(map[string]string)
+		if err := json.Unmarshal(analysis.Metadata, &analysis.MetadataMap); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal metadata: %v", err)
+		}
+	}
+
+	return &analysis, nil
+}
+
+//Results section
+
