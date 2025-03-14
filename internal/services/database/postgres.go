@@ -222,5 +222,229 @@ func (p *PostgresService) GetAnalysisRecordByUUID(ctx context.Context, analysisU
 	return &analysis, nil
 }
 
+// below is mostly copied from AI generation, too much SQL boilerplate - may need to correct later
 //Results section
+func (p *PostgresService) CreateResultRecord(ctx context.Context, analysisID int64, resultType, storageType, storageKey, contentType string, sizeBytes int64, metadata map[string]string) (int64, error) {
+	// Convert metadata to JSON
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal metadata: %v", err)
+	}
 
+	// Insert result record
+	query := `
+		INSERT INTO biomarker.results 
+		(analysis_id, result_type, storage_type, storage_key, content_type, size_bytes, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING result_id
+	`
+	
+	var resultID int64
+	err = p.db.GetContext(ctx, &resultID, query, analysisID, resultType, storageType, storageKey, contentType, sizeBytes, metadataJSON)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create result record: %v", err)
+	}
+
+	log.Printf("Created result record with ID: %d for analysis ID: %d", resultID, analysisID)
+	return resultID, nil
+}
+
+func (p *PostgresService) GetResultsByAnalysisUUID(ctx context.Context, analysisUUID string) ([]ResultRecord, error) {
+	query := `
+		SELECT r.result_id, r.analysis_id, r.result_type, r.storage_type, 
+		r.storage_key, r.content_type, r.size_bytes, r.created_at, r.metadata
+		FROM biomarker.results r
+		JOIN biomarker.analyses a ON r.analysis_id = a.analysis_id
+		WHERE a.analysis_uuid = $1
+	`
+	
+	var results []ResultRecord
+	err := p.db.SelectContext(ctx, &results, query, analysisUUID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query results: %v", err)
+	}
+
+	// Parse metadata JSON for each result
+	for i := range results {
+		if results[i].Metadata != nil {
+			results[i].MetadataMap = make(map[string]string)
+			if err := json.Unmarshal(results[i].Metadata, &results[i].MetadataMap); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal result metadata: %v", err)
+			}
+		}
+	}
+
+	return results, nil
+}
+
+// GetLatestAnalysesByFilePath gets the latest analyses for a file path
+func (p *PostgresService) GetLatestAnalysesByFilePath(ctx context.Context, filePath string, limit int) ([]AnalysisDetails, error) {
+	if limit <= 0 {
+		limit = 10 // Default limit
+	}
+
+	// First get the file ID
+	var fileID int64
+	err := p.db.GetContext(ctx, &fileID, "SELECT file_id FROM biomarker.files WHERE file_path = $1", filePath)
+	if err != nil {
+		if errors.Is(err, sqlx.ErrNoRows) {
+			return nil, nil // File not found
+		}
+		return nil, fmt.Errorf("failed to get file ID: %v", err)
+	}
+
+	// Get analysis records
+	query := `
+		SELECT analysis_id, analysis_uuid, file_id, analysis_type, status,
+		started_at, completed_at, duration_ms, error_message, created_by, metadata
+		FROM biomarker.analyses
+		WHERE file_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2
+	`
+	
+	var analyses []AnalysisRecord
+	err = p.db.SelectContext(ctx, &analyses, query, fileID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query analyses: %v", err)
+	}
+
+	// Get file details
+	var file FileRecord
+	err = p.db.GetContext(ctx, &file, `
+		SELECT file_id, file_path, file_name, file_type, file_size, 
+		created_at, last_modified, checksum, metadata
+		FROM biomarker.files
+		WHERE file_id = $1
+	`, fileID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file details: %v", err)
+	}
+
+	// Parse file metadata
+	if file.Metadata != nil {
+		file.MetadataMap = make(map[string]string)
+		if err := json.Unmarshal(file.Metadata, &file.MetadataMap); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal file metadata: %v", err)
+		}
+	}
+
+	// Combine results
+	var analysisDetails []AnalysisDetails
+	for _, analysis := range analyses {
+		// Parse analysis metadata
+		if analysis.Metadata != nil {
+			analysis.MetadataMap = make(map[string]string)
+			if err := json.Unmarshal(analysis.Metadata, &analysis.MetadataMap); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal analysis metadata: %v", err)
+			}
+		}
+
+		// Get results for this analysis
+		results, err := p.GetResultsByAnalysisUUID(ctx, analysis.AnalysisUUID)
+		if err != nil {
+			return nil, err
+		}
+
+		details := AnalysisDetails{
+			AnalysisRecord: analysis,
+			FileRecord:     file,
+			Results:        results,
+		}
+
+		analysisDetails = append(analysisDetails, details)
+	}
+
+	return analysisDetails, nil
+}
+
+// ListAnalyses lists all analyses with optional filters
+func (p *PostgresService) ListAnalyses(ctx context.Context, status string, limit, offset int) ([]AnalysisDetails, error) {
+	if limit <= 0 {
+		limit = 20 // Default limit
+	}
+	
+	if offset < 0 {
+		offset = 0
+	}
+	
+	// Base query
+	baseQuery := `
+		SELECT a.analysis_id, a.analysis_uuid, a.file_id, a.analysis_type, a.status,
+		a.started_at, a.completed_at, a.duration_ms, a.error_message, a.created_by, a.metadata
+		FROM biomarker.analyses a
+	`
+	
+	// Add filters
+	var args []interface{}
+	argCount := 1
+	
+	whereClause := ""
+	if status != "" {
+		whereClause = " WHERE a.status = $1"
+		args = append(args, status)
+		argCount++
+	}
+	
+	// Add ordering and pagination
+	query := baseQuery + whereClause + 
+		" ORDER BY a.created_at DESC LIMIT $" + fmt.Sprintf("%d", argCount) + 
+		" OFFSET $" + fmt.Sprintf("%d", argCount+1)
+	
+	args = append(args, limit, offset)
+	
+	// Execute query
+	var analyses []AnalysisRecord
+	err := p.db.SelectContext(ctx, &analyses, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list analyses: %v", err)
+	}
+	
+	// Assemble full details for each analysis
+	var results []AnalysisDetails
+	for _, analysis := range analyses {
+		// Get file details
+		var file FileRecord
+		err := p.db.GetContext(ctx, &file, `
+			SELECT file_id, file_path, file_name, file_type, file_size, 
+			created_at, last_modified, checksum, metadata
+			FROM biomarker.files
+			WHERE file_id = $1
+		`, analysis.FileID)
+		if err != nil {
+			log.Printf("Warning: failed to get file details for analysis %s: %v", analysis.AnalysisUUID, err)
+			continue
+		}
+		
+		// Parse metadata
+		if analysis.Metadata != nil {
+			analysis.MetadataMap = make(map[string]string)
+			if err := json.Unmarshal(analysis.Metadata, &analysis.MetadataMap); err != nil {
+				log.Printf("Warning: failed to unmarshal analysis metadata: %v", err)
+			}
+		}
+		
+		if file.Metadata != nil {
+			file.MetadataMap = make(map[string]string)
+			if err := json.Unmarshal(file.Metadata, &file.MetadataMap); err != nil {
+				log.Printf("Warning: failed to unmarshal file metadata: %v", err)
+			}
+		}
+		
+		// Get results
+		analysisResults, err := p.GetResultsByAnalysisUUID(ctx, analysis.AnalysisUUID)
+		if err != nil {
+			log.Printf("Warning: failed to get results for analysis %s: %v", analysis.AnalysisUUID, err)
+		}
+		
+		details := AnalysisDetails{
+			AnalysisRecord: analysis,
+			FileRecord:     file,
+			Results:        analysisResults,
+		}
+		
+		results = append(results, details)
+	}
+	
+	return results, nil
+}
